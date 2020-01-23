@@ -4,8 +4,8 @@ import java.io.*;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.eclipsesource.json.JsonArray;
 import com.eclipsesource.json.JsonObject;
-import com.sun.org.apache.xpath.internal.operations.String;
 import org.corpus_tools.pepper.common.DOCUMENT_STATUS;
 import org.corpus_tools.pepper.impl.PepperMapperImpl;
 import org.corpus_tools.salt.SALT_TYPE;
@@ -32,14 +32,48 @@ public class StreusleMapper extends PepperMapperImpl {
         return doc.createTextualDS(sentenceText.toString());
     }
 
-    private void processDocument(SDocumentGraph doc, JsonValue jsonRoot) throws StreusleProcessingException {
-        // Root element: a list of sentences
-        assert jsonRoot.isArray();
+    private List<SToken> tokenizeSentence(SDocumentGraph doc, STextualDS primaryText,
+                                          String sentenceString, int sOffset, JsonArray tokList) {
+        List<SToken> tokens = new ArrayList<>();
+        int lastTokEndIndex = 0;
+        for (JsonValue tokV : tokList.asArray()) {
+            JsonObject tokObj = tokV.asObject();
+            String tokenString = tokObj.get("word").asString();
 
+            int beginIndex = sentenceString.indexOf(tokenString, lastTokEndIndex);
+            assert beginIndex > -1;
+
+            lastTokEndIndex = beginIndex + tokenString.length();
+            SToken token = doc.createToken(primaryText, sOffset + beginIndex, sOffset + lastTokEndIndex);
+            tokens.add(token);
+        }
+
+        return tokens;
+    }
+
+    private void processSentence(SDocumentGraph doc, STextualDS primaryText, JsonObject sentence) {
+        // get the sentence text, e.g. "My 8 year old daughter loves this place."
+        JsonValue sentenceStringV = sentence.get("text");
+        String sentenceString = sentenceStringV.asString();
+
+        // find where the sentence begins in the document
+        int sOffset = primaryText.getText().indexOf(sentenceString);
+        assert sOffset > -1;
+
+        // get the list of token dicts, e.g. [{"#": 1, "word": "My", ...}, {"#": 2, "word": "8", ...}, ...]
+        JsonArray tokList = sentence.get("toks").asArray();
+
+        // make the SToken objects by looping over the array--we'll take care of annotations in other loops
+        // would maybe be marginally more performant to process annotations all in one loop, but I will
+        // prioritize clarity of code over performance
+        List<SToken> tokens = tokenizeSentence(doc, primaryText, sentenceString, sOffset, tokList);
+
+    }
+
+    private void processDocument(SDocumentGraph doc, JsonValue jsonRoot) throws StreusleProcessingException {
         // cast each sentence into a JsonObject and keep them in a list, we'll need to loop over them
         List<JsonObject> sentences = new ArrayList<>();
         for (JsonValue sentenceValue : jsonRoot.asArray()) {
-            assert sentenceValue.isObject();
             JsonObject sentence = sentenceValue.asObject();
             sentences.add(sentence);
         }
@@ -47,6 +81,10 @@ public class StreusleMapper extends PepperMapperImpl {
         // make the STextualDS
         STextualDS primaryText = buildTextualDS(doc, sentences);
 
+        // process each sentence independently
+        for (JsonObject sentence : sentences) {
+            processSentence(doc, primaryText, sentence);
+        }
     }
 
     @Override

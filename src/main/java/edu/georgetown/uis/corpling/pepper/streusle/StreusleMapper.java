@@ -25,7 +25,6 @@ public class StreusleMapper extends PepperMapperImpl {
         StringBuilder sentenceText = new StringBuilder();
         for (JsonObject sentence : sentences) {
             JsonValue tObj = sentence.get("text");
-            assert tObj.isString();
             sentenceText.append(tObj.asString());
             sentenceText.append("\t"); // TODO: Is there a better character to separate sentences?
         }
@@ -41,7 +40,13 @@ public class StreusleMapper extends PepperMapperImpl {
             String tokenString = tokObj.get("word").asString();
 
             int beginIndex = sentenceString.indexOf(tokenString, lastTokEndIndex);
-            assert beginIndex > -1;
+            if (beginIndex < 0) {
+                throw new UnsupportedOperationException(
+                        "Couldn't find the token string `" + tokenString
+                                + "` after index " + lastTokEndIndex
+                                + " in sentence `" + sentenceString + "`"
+                );
+            }
 
             lastTokEndIndex = beginIndex + tokenString.length();
             SToken token = doc.createToken(primaryText, sOffset + beginIndex, sOffset + lastTokEndIndex);
@@ -58,7 +63,12 @@ public class StreusleMapper extends PepperMapperImpl {
 
         // find where the sentence begins in the document
         int sOffset = primaryText.getText().indexOf(sentenceString);
-        assert sOffset > -1;
+        if (sOffset < 0) {
+            throw new UnsupportedOperationException(
+                    "Couldn't find the sentence `" + sentenceString
+                            + " in the document `" + primaryText.getText() + "`"
+            );
+        }
 
         // get the list of token dicts, e.g. [{"#": 1, "word": "My", ...}, {"#": 2, "word": "8", ...}, ...]
         JsonArray tokList = sentence.get("toks").asArray();
@@ -70,7 +80,7 @@ public class StreusleMapper extends PepperMapperImpl {
 
     }
 
-    private void processDocument(SDocumentGraph doc, JsonValue jsonRoot) throws StreusleProcessingException {
+    private void processDocument(SDocumentGraph doc, JsonValue jsonRoot) {
         // cast each sentence into a JsonObject and keep them in a list, we'll need to loop over them
         List<JsonObject> sentences = new ArrayList<>();
         for (JsonValue sentenceValue : jsonRoot.asArray()) {
@@ -104,12 +114,7 @@ public class StreusleMapper extends PepperMapperImpl {
         SDocumentGraph dg = SaltFactory.createSDocumentGraph();
         d.setDocumentGraph(dg);
 
-        try {
-            processDocument(dg, json);
-        } catch (StreusleProcessingException e) {
-            return DOCUMENT_STATUS.FAILED;
-        }
-
+        processDocument(dg, json);
         return DOCUMENT_STATUS.COMPLETED;
 
         ///**
@@ -304,10 +309,6 @@ public class StreusleMapper extends PepperMapperImpl {
         //// now we are done and return the status that everything was
         //// successful
         //return (DOCUMENT_STATUS.COMPLETED);
-    }
-
-    private class StreusleProcessingException extends Exception {
-
     }
 }
 

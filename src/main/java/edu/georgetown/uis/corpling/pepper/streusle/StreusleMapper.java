@@ -1,16 +1,16 @@
 package edu.georgetown.uis.corpling.pepper.streusle;
 
 import java.io.*;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 
 import com.eclipsesource.json.JsonArray;
 import com.eclipsesource.json.JsonObject;
 import org.corpus_tools.pepper.common.DOCUMENT_STATUS;
 import org.corpus_tools.pepper.impl.PepperMapperImpl;
-import org.corpus_tools.salt.SALT_TYPE;
 import org.corpus_tools.salt.SaltFactory;
 import org.corpus_tools.salt.common.*;
+import org.corpus_tools.salt.core.SAnnotation;
+import org.corpus_tools.salt.core.SLayer;
 import org.eclipse.emf.common.util.URI;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,6 +21,19 @@ import com.eclipsesource.json.JsonValue;
 public class StreusleMapper extends PepperMapperImpl {
     private static final Logger logger = LoggerFactory.getLogger(StreusleImporter.class);
 
+    private void annotateToken(SToken token, String key, String value) {
+        SAnnotation ann = SaltFactory.createSAnnotation();
+        ann.setName(key);
+        ann.setValue(value);
+        token.addAnnotation(ann);
+    }
+
+    /**
+     * JSON doesn't provide us the unbroken text for the whole doc. We need to do that here
+     * by getting each sentence's text and turning it into a tab-separated string.
+     * Finally, we make a TextualDS for the whole thing and return it. This is the
+     * foundation of our document-level SALT graph.
+     */
     private STextualDS buildTextualDS(SDocumentGraph doc, List<JsonObject> sentences) {
         StringBuilder sentenceText = new StringBuilder();
         for (JsonObject sentence : sentences) {
@@ -31,14 +44,29 @@ public class StreusleMapper extends PepperMapperImpl {
         return doc.createTextualDS(sentenceText.toString());
     }
 
-    private List<SToken> tokenizeSentence(SDocumentGraph doc, STextualDS primaryText,
-                                          String sentenceString, int sOffset, JsonArray tokList) {
-        List<SToken> tokens = new ArrayList<>();
+    /**
+     * Goal: we now have a TextualDS for the whole document, and we need to make STokens for every token in the JSON.
+     * Problem: the JSON tokens don't have the integral String offsets that we need in order to tell SALT where tokens
+     *          begin and end
+     * Solution: "chomp our way" up the sentence string finding one word at a time using indexOf, keeping track
+     *           of how much of the string we've already chomped.
+     * @param doc the document graph
+     * @param tokens a JSON array of tokens, which are JSON objects
+     * @param primaryText from buildTextualDS--the STextualDS we'll build our tokens on
+     * @param sentenceString The literal string content of the sentence we're processing
+     * @param sOffset where in STextualDS this sentence BEGINS. We need this because our STextualDS
+     *                indexes apply for the whole document text, not just for this sentence
+     * @return The tokens that were created for this sentence
+     */
+    private List<SToken> processWordField(SDocumentGraph doc, List<JsonObject> tokens,
+                                          STextualDS primaryText, String sentenceString, int sOffset) {
+        List<SToken> sTokens = new ArrayList<>();
         int lastTokEndIndex = 0;
-        for (JsonValue tokV : tokList.asArray()) {
-            JsonObject tokObj = tokV.asObject();
-            String tokenString = tokObj.get("word").asString();
+        for (JsonObject token : tokens) {
+            // what do we need to look for? simple, the next token in the sentence that hasn't been processed
+            String tokenString = token.get("word").asString();
 
+            // chomp chomp! only start looking from lastTokEndIndex
             int beginIndex = sentenceString.indexOf(tokenString, lastTokEndIndex);
             if (beginIndex < 0) {
                 throw new UnsupportedOperationException(
@@ -48,18 +76,235 @@ public class StreusleMapper extends PepperMapperImpl {
                 );
             }
 
+            // great, we found the token we wanted to find, as expected. Add its length so we know where it ended
             lastTokEndIndex = beginIndex + tokenString.length();
-            SToken token = doc.createToken(primaryText, sOffset + beginIndex, sOffset + lastTokEndIndex);
-            tokens.add(token);
+            // create the token, being CAREFUL to add the sOffset to account for any sentences before this one
+            SToken sToken = doc.createToken(primaryText, sOffset + beginIndex, sOffset + lastTokEndIndex);
+            sTokens.add(sToken);
         }
 
-        return tokens;
+        return sTokens;
     }
 
-    private void processSentence(SDocumentGraph doc, STextualDS primaryText, JsonObject sentence) {
+    /**
+     * Annotates tokens with their CONLLU ID and also returns a map from CONLLU ID to SToken--useful for
+     * adding dependencies later. Why is it Map<String and not Map<Integer? Because non-integral CONLLU
+     * IDs are allowed: supertokens (e.g. 5-6) and ellipsis tokens (e.g. 5.1). Since STREUSLE currently
+     * (2020/01/31) doesn't have either extended token type, we don't implement support for them, but
+     * we keep the type in the map String as a reminder.
+     * @return A map from 1-indexed CONLLU ID (e.g. 5) as a string to the SToken instance.
+     */
+    private Map<String, SToken> processIdField(List<SToken> sTokens, List<JsonObject> tokens) {
+        Map<String, SToken> id2token = new HashMap<>();
+
+        for (int i = 0; i < tokens.size(); i++) {
+            JsonValue idVal = tokens.get(i).asObject().get("#");
+            String id = Integer.toString(idVal.asInt());
+            SToken sToken = sTokens.get(i);
+            annotateToken(sToken, "conllu_id", id);
+            id2token.put(id, sToken);
+        }
+
+        return id2token;
+    }
+
+    /**
+     * Annotates each token with its lemma under the key "lemma"
+     */
+    private void processLemmaField(List<SToken> sTokens, List<JsonObject> tokens) {
+        for (int i = 0; i < sTokens.size(); i++) {
+            JsonValue jsonLemmaVal = tokens.get(i).asObject().get("lemma");
+            if (jsonLemmaVal == null || jsonLemmaVal.isNull()) {
+                continue;
+            }
+            SToken sToken = sTokens.get(i);
+            annotateToken(sToken, "lemma", jsonLemmaVal.asString());
+        }
+    }
+
+    /**
+     * Annotates each token with its universal part of speech under the key "upos"
+     */
+    private void processUposField(List<SToken> sTokens, List<JsonObject> tokens) {
+        for (int i = 0; i < sTokens.size(); i++) {
+            JsonValue jsonUposVal = tokens.get(i).asObject().get("upos");
+            if (jsonUposVal == null || jsonUposVal.isNull()) {
+                continue;
+            }
+            SToken sToken = sTokens.get(i);
+            annotateToken(sToken, "upos", jsonUposVal.asString());
+        }
+    }
+
+    /**
+     * Annotates each token with its external part of speech under the key "pos"
+     */
+    private void processXposField(List<SToken> sTokens, List<JsonObject> tokens) {
+        for (int i = 0; i < sTokens.size(); i++) {
+            JsonValue jsonXposVal = tokens.get(i).asObject().get("xpos");
+            if (jsonXposVal == null || jsonXposVal.isNull()) {
+                continue;
+            }
+            SToken sToken = sTokens.get(i);
+            annotateToken(sToken, "pos", jsonXposVal.asString());
+        }
+    }
+
+    /**
+     * Annotates the token for every feature that is defined on it, e.g. A=B, where
+     * A will be the annotation's key and B will be the annotation's value.
+     */
+    private void processFeatsField(List<SToken> sTokens, List<JsonObject> tokens) {
+        for (int i = 0; i < sTokens.size(); i++) {
+            JsonValue jsonFeatsVal = tokens.get(i).asObject().get("feats");
+            if (jsonFeatsVal == null || jsonFeatsVal.isNull()) {
+                continue;
+            }
+
+            SToken sToken = sTokens.get(i);
+            for (String feat : jsonFeatsVal.asString().split("\\|")) {
+                String[] pieces = feat.split("=");
+                annotateToken(sToken, pieces[0], pieces[1]);
+            }
+        }
+    }
+
+    /**
+     * Add an SPointingRelation for each dependency. The root dependency is ignored by SALT convention.
+     * @return a list of CONLLU ID strings, parallel to the sTokens list in index, that if non-null indicates
+     *         the ID of the parent of a relation pointing to the sToken at that index, if there was any.
+     *         We need this later to avoid duplicating relations.
+     */
+    private List<String> processHeadAndDeprelField(SDocumentGraph doc, Map<String, SToken> id2token,
+                                                    List<SToken> sTokens, List<JsonObject> tokens) {
+        List<String> headIds = new ArrayList<>();
+        for (int i = 0; i < sTokens.size(); i++) {
+            JsonValue jsonHeadVal = tokens.get(i).asObject().get("head");
+            JsonValue jsonDeprelVal = tokens.get(i).asObject().get("deprel");
+            if (jsonHeadVal == null || jsonHeadVal.isNull()
+                    || jsonDeprelVal == null || jsonDeprelVal.isNull()
+                    // root element, ignore because it is by convention not represented in SALT
+                    || (jsonHeadVal.isNumber() && jsonHeadVal.asDouble() == 0)
+            ) {
+                headIds.add(null);
+                continue;
+            }
+
+            SToken child = sTokens.get(i);
+            SToken head = id2token.get(Integer.toString(jsonHeadVal.asInt()));
+
+            // model a syntactic dependency as an SPointingRelation going from head to child
+            SPointingRelation rel = SaltFactory.createSPointingRelation();
+            rel.setType("ud");
+            rel.setSource(head);
+            rel.setTarget(child);
+
+            // annotate the edge with deprel
+            SAnnotation deprelAnn = SaltFactory.createSAnnotation();
+            deprelAnn.setName("deprel");
+            deprelAnn.setValue(jsonDeprelVal.asString());
+            rel.addAnnotation(deprelAnn);
+            doc.addRelation(rel);
+
+            // keep track of the head we processed so we can only add any further heads later on
+            headIds.add(Integer.toString(jsonHeadVal.asInt()));
+        }
+        return headIds;
+    }
+
+    // caution: this is called "edeps" in the JSON, but "DEPS" in the documentation
+
+    /**
+     * Handle enhanced dependencies. Careful, the JSON field name is "edeps", but the CONLLU spec
+     * refers to this column as "DEPS". We avoid processing any dependencies that were already added.
+     * @param doc
+     * @param id2token CONLLU ID to SToken
+     * @param sTokens SALT tokens
+     * @param tokens JSON tokens
+     * @param edepsLayer The layer containing the enhanced dependencies.
+     * @param headIdsAlreadyProcessed A list of head IDs that will be used for each token to ignore a dependency
+     *                                that has already been processed.
+     */
+    private void processDepsField(SDocumentGraph doc, Map<String, SToken> id2token, List<SToken> sTokens,
+                                  List<JsonObject> tokens, SLayer edepsLayer, List<String> headIdsAlreadyProcessed) {
+        for (int i = 0; i < sTokens.size(); i++) {
+            JsonValue jsonDepsVal = tokens.get(i).asObject().get("edeps");
+            if (jsonDepsVal == null || jsonDepsVal.isNull()) {
+                continue;
+            }
+
+            SToken child = sTokens.get(i);
+            for (String deps : jsonDepsVal.asString().split("\\|")) {
+                String[] pieces = deps.split(":");
+
+                // skip the dep if we've already processed it or it's a root node
+                if (pieces[0].equals(headIdsAlreadyProcessed.get(i)) || pieces[0].equals("0")) {
+                    continue;
+                }
+                SToken head = id2token.get(pieces[0]);
+
+                SPointingRelation rel = SaltFactory.createSPointingRelation();
+                rel.setType("ud");
+                rel.setSource(head);
+                rel.setTarget(child);
+
+                // annotate the edge with deprel
+                SAnnotation deprelAnn = SaltFactory.createSAnnotation();
+                deprelAnn.setName("deprel");
+                // not as simple as pieces[1]: vals might contain colons like in 5:nmod:poss|...
+                List<String> otherPieces = Arrays.asList(pieces).subList(1, pieces.length - 1);
+                String deprelVal = String.join(":", otherPieces);
+                deprelAnn.setValue(deprelVal);
+                rel.addAnnotation(deprelAnn);
+            }
+        }
+    }
+
+    /**
+     * Just like FEATS: we add an annotation for each item in the MISC list.
+     */
+    private void processMiscField(List<SToken> sTokens, List<JsonObject> tokens) {
+        for (int i = 0; i < sTokens.size(); i++) {
+            JsonValue jsonMiscVal = tokens.get(i).asObject().get("misc");
+            if (jsonMiscVal == null || jsonMiscVal.isNull()) {
+                continue;
+            }
+
+            SToken sToken = sTokens.get(i);
+            for (String misc : jsonMiscVal.asString().split("\\|")) {
+                String[] pieces = misc.split("=");
+                annotateToken(sToken, pieces[0], pieces[1]);
+            }
+        }
+    }
+
+    // For CONLLULEX
+    private void processSmweField(List<SToken> sTokens, List<JsonObject> tokens) {}
+    private void processLexcatField(List<SToken> sTokens, List<JsonObject> tokens) {}
+    private void processLexlemmaField(List<SToken> sTokens, List<JsonObject> tokens) {}
+    private void processSsField(List<SToken> sTokens, List<JsonObject> tokens) {}
+    private void processSs2Field(List<SToken> sTokens, List<JsonObject> tokens) {}
+    private void processWmweField(List<SToken> sTokens, List<JsonObject> tokens) {}
+    private void processWcatField(List<SToken> sTokens, List<JsonObject> tokens) {}
+    private void processWlemmaField(List<SToken> sTokens, List<JsonObject> tokens) {}
+    private void processLextagField(List<SToken> sTokens, List<JsonObject> tokens) {}
+    // consider using dominance relations for discontinuous spans
+
+    /**
+     * Top-level function invoked for each sentence in the document. The "toks" property
+     * in the `sentence` param contains an array of tokens, where each token is an object
+     * where each property of that object corresponds to a CONLLULEX column. We will make
+     * a separate function for each column to build up the sentence structure in a
+     * programmatically decoupled way.
+     * @param doc ref to the SDocumentGraph
+     * @param primaryText the STextualDS object anchoring all our annotations
+     * @param sentence the JSON piece corresponding to this sentence, which is a JSON object
+     *                 with fields "sent_id", "streusle_sent_id", "mwe", "toks", "etoks",
+     *                 "swes", "smwes", and "wmwes".
+     */
+    private void processSentence(SDocumentGraph doc, SLayer edepsLayer, STextualDS primaryText, JsonObject sentence) {
         // get the sentence text, e.g. "My 8 year old daughter loves this place."
-        JsonValue sentenceStringV = sentence.get("text");
-        String sentenceString = sentenceStringV.asString();
+        String sentenceString = sentence.get("text").asString();
 
         // find where the sentence begins in the document
         int sOffset = primaryText.getText().indexOf(sentenceString);
@@ -71,17 +316,52 @@ public class StreusleMapper extends PepperMapperImpl {
         }
 
         // get the list of token dicts, e.g. [{"#": 1, "word": "My", ...}, {"#": 2, "word": "8", ...}, ...]
-        JsonArray tokList = sentence.get("toks").asArray();
+        JsonArray tokenArray = sentence.get("toks").asArray();
+        List<JsonObject> tokens = new ArrayList<>();
+        for (JsonValue token : tokenArray) {
+            tokens.add(token.asObject());
+        }
 
         // make the SToken objects by looping over the array--we'll take care of annotations in other loops
         // would maybe be marginally more performant to process annotations all in one loop, but I will
         // prioritize clarity of code over performance
-        List<SToken> tokens = tokenizeSentence(doc, primaryText, sentenceString, sOffset, tokList);
-
+        // column 2, FORM
+        List<SToken> sTokens = processWordField(doc, tokens, primaryText, sentenceString, sOffset);
+        // column 1, ID
+        Map<String, SToken> id2token = processIdField(sTokens, tokens);
+        // column 3, LEMMA
+        processLemmaField(sTokens, tokens);
+        // column 4, UPOS
+        processUposField(sTokens, tokens);
+        // column 5, XPOS
+        processXposField(sTokens, tokens);
+        // column 6, FEATS
+        processFeatsField(sTokens, tokens);
+        // columns 7 and 8, HEAD and DEPREL
+        List<String> headIdsAlreadyProcessed = processHeadAndDeprelField(doc, id2token, sTokens, tokens);
+        // column 9, DEPS
+        processDepsField(doc, id2token, sTokens, tokens, edepsLayer, headIdsAlreadyProcessed);
+        // column 10, MISC
+        processMiscField(sTokens, tokens);
     }
 
+    /**
+     * Top-level function for processing a STREUSLE JSON that sets up the STextualDS for the document
+     * and kicks off processing of each sentence.
+     * @param doc A reference to the SDocumentGraph
+     * @param jsonRoot The root of the raw parsed JSON
+     */
     private void processDocument(SDocumentGraph doc, JsonValue jsonRoot) {
-        // cast each sentence into a JsonObject and keep them in a list, we'll need to loop over them
+        // note that throughout the com.eclipsesource.json package's API, a JsonValue is returned, and
+        // we need to call an `.asXxxx` function to attempt to parse it and cast it as a subtype. If
+        // this downcasting fails (e.g., we call .asArray() on a JsonValue that is actually a JsonString
+        // instead of a JsonArray), then an UnsupportedOperationException will be thrown. This exception
+        // is handled gracefully by Pepper, which will report a document conversion failure and display
+        // the reason for the exception. For this reason, we do NOT need to check if a conversion is
+        // valid first.
+
+        // Cast each sentence into a JsonObject and keep them in a list, we'll need to loop over them.
+
         List<JsonObject> sentences = new ArrayList<>();
         for (JsonValue sentenceValue : jsonRoot.asArray()) {
             JsonObject sentence = sentenceValue.asObject();
@@ -91,17 +371,28 @@ public class StreusleMapper extends PepperMapperImpl {
         // make the STextualDS
         STextualDS primaryText = buildTextualDS(doc, sentences);
 
+        // make and hold on to a layer reference for enhanced dependencies: any relation
+        SLayer edeps = SaltFactory.createSLayer();
+        edeps.setName("edeps");
+        edeps.setId("edeps");
+        doc.addLayer(edeps);
+
         // process each sentence independently
         for (JsonObject sentence : sentences) {
-            processSentence(doc, primaryText, sentence);
+            processSentence(doc, edeps, primaryText, sentence);
         }
     }
 
+    /**
+     * Takes <em>document-level</em> STREUSLE JSON's and turns them into SALT.
+     */
     @Override
     public DOCUMENT_STATUS mapSDocument() {
-        // parse the JSON
+        // Pepper tells us the URI of the document being processed
         URI resource = getResourceURI();
         logger.debug("Importing the file {}.", resource);
+
+        // Attempt to parse the file at that URI as JSON
         JsonValue json;
         try {
             json = Json.parse(new FileReader(resource.toFileString()));
@@ -109,206 +400,14 @@ public class StreusleMapper extends PepperMapperImpl {
             return DOCUMENT_STATUS.FAILED;
         }
 
-        // init state of doc
+        // Pepper has already prepared an SDocument object. Grab it and init it
         SDocument d = getDocument();
         SDocumentGraph dg = SaltFactory.createSDocumentGraph();
         d.setDocumentGraph(dg);
 
+        // Begin processing the JSON's contents
         processDocument(dg, json);
         return DOCUMENT_STATUS.COMPLETED;
-
-        ///**
-        // * STEP 1: we create the primary data and hold a reference on the
-        // * primary data object
-        // */
-        //STextualDS primaryText = getDocument().getDocumentGraph().createTextualDS("Is this example more complicated than it appears to be?");
-
-        //// we add a progress to notify the user about the process status
-        //// (this is very helpful, especially for longer taking processes)
-        //addProgress(0.16);
-
-        ///**
-        // * STEP 2: we create a tokenization over the primary data
-        // */
-        //SToken tok_is = getDocument().getDocumentGraph().createToken(primaryText, 0, 2); // Is
-        //SToken tok_thi = getDocument().getDocumentGraph().createToken(primaryText, 3, 7); // this
-        //SToken tok_exa = getDocument().getDocumentGraph().createToken(primaryText, 8, 15); // example
-        //SToken tok_mor = getDocument().getDocumentGraph().createToken(primaryText, 16, 20); // more
-        //SToken tok_com = getDocument().getDocumentGraph().createToken(primaryText, 21, 32); // complicated
-        //SToken tok_tha = getDocument().getDocumentGraph().createToken(primaryText, 33, 37); // than
-        //SToken tok_it = getDocument().getDocumentGraph().createToken(primaryText, 38, 40); // it
-        //SToken tok_app = getDocument().getDocumentGraph().createToken(primaryText, 41, 48); // appears
-        //SToken tok_to = getDocument().getDocumentGraph().createToken(primaryText, 49, 51); // to
-        //SToken tok_be = getDocument().getDocumentGraph().createToken(primaryText, 52, 54); // be
-        //SToken tok_PUN = getDocument().getDocumentGraph().createToken(primaryText, 54, 55); // ?
-
-        //// we add a progress to notify the user about the process status
-        //// (this is very helpful, especially for longer taking processes)
-        //addProgress(0.16);
-
-        ///**
-        // * STEP 3: we create a part-of-speech and a lemma annotation for
-        // * tokens
-        // */
-        //// we create part-of-speech annotations
-        //tok_is.createAnnotation(null, "pos", "VBZ");
-        //tok_thi.createAnnotation(null, "pos", "DT");
-        //tok_exa.createAnnotation(null, "pos", "NN");
-        //tok_mor.createAnnotation(null, "pos", "RBR");
-        //tok_com.createAnnotation(null, "pos", "JJ");
-        //tok_tha.createAnnotation(null, "pos", "IN");
-        //tok_it.createAnnotation(null, "pos", "PRP");
-        //tok_app.createAnnotation(null, "pos", "VBZ");
-        //tok_to.createAnnotation(null, "pos", "TO");
-        //tok_be.createAnnotation(null, "pos", "VB");
-        //tok_PUN.createAnnotation(null, "pos", ".");
-
-        //// we create lemma annotations
-        //tok_is.createAnnotation(null, "lemma", "be");
-        //tok_thi.createAnnotation(null, "lemma", "this");
-        //tok_exa.createAnnotation(null, "lemma", "example");
-        //tok_mor.createAnnotation(null, "lemma", "more");
-        //tok_com.createAnnotation(null, "lemma", "complicated");
-        //tok_tha.createAnnotation(null, "lemma", "than");
-        //tok_it.createAnnotation(null, "lemma", "it");
-        //tok_app.createAnnotation(null, "lemma", "appear");
-        //tok_to.createAnnotation(null, "lemma", "to");
-        //tok_be.createAnnotation(null, "lemma", "be");
-        //tok_PUN.createAnnotation(null, "lemma", ".");
-
-        //// we add a progress to notify the user about the process status
-        //// (this is very helpful, especially for longer taking processes)
-        //addProgress(0.16);
-
-        ///**
-        // * STEP 4: we create some information structure annotations via
-        // * spans, spans can be used, to group tokens to a set, which can be
-        // * annotated
-        // * <table border="1">
-        // * <tr>
-        // * <td>contrast-focus</td>
-        // * <td colspan="9">topic</td>
-        // * </tr>
-        // * <tr>
-        // * <td>Is</td>
-        // * <td>this</td>
-        // * <td>example</td>
-        // * <td>more</td>
-        // * <td>complicated</td>
-        // * <td>than</td>
-        // * <td>it</td>
-        // * <td>appears</td>
-        // * <td>to</td>
-        // * <td>be</td>
-        // * </tr>
-        // * </table>
-        // */
-        //SSpan contrastFocus = getDocument().getDocumentGraph().createSpan(tok_is);
-        //contrastFocus.createAnnotation(null, "Inf-Struct", "contrast-focus");
-        //List<SToken> topic_set = new ArrayList<SToken>();
-        //topic_set.add(tok_thi);
-        //topic_set.add(tok_exa);
-        //topic_set.add(tok_mor);
-        //topic_set.add(tok_com);
-        //topic_set.add(tok_tha);
-        //topic_set.add(tok_it);
-        //topic_set.add(tok_app);
-        //topic_set.add(tok_to);
-        //topic_set.add(tok_be);
-        //SSpan topic = getDocument().getDocumentGraph().createSpan(topic_set);
-        //topic.createAnnotation(null, "Inf-Struct", "topic");
-
-        //// we add a progress to notify the user about the process status
-        //// (this is very helpful, especially for longer taking processes)
-        //addProgress(0.16);
-
-        ///**
-        // * STEP 5: we create anaphoric relation between 'it' and 'this
-        // * example', therefore 'this example' must be added to a span. This
-        // * makes use of the graph based model of Salt. First we create a
-        // * relation, than we set its source and its target node and last we
-        // * add the relation to the graph.
-        // */
-        //List<SToken> target_set = new ArrayList<SToken>();
-        //target_set.add(tok_thi);
-        //target_set.add(tok_exa);
-        //SSpan target = getDocument().getDocumentGraph().createSpan(target_set);
-        //SPointingRelation anaphoricRel = SaltFactory.createSPointingRelation();
-        //anaphoricRel.setSource(tok_is);
-        //anaphoricRel.setTarget(target);
-        //anaphoricRel.setType("anaphoric");
-        //// we add the created relation to the graph
-        //getDocument().getDocumentGraph().addRelation(anaphoricRel);
-
-        //// we add a progress to notify the user about the process status
-        //// (this is very helpful, especially for longer taking processes)
-        //addProgress(0.16);
-
-        ///**
-        // * STEP 6: We create a syntax tree following the Tiger scheme
-        // */
-        //SStructure root = SaltFactory.createSStructure();
-        //SStructure sq = SaltFactory.createSStructure();
-        //SStructure np1 = SaltFactory.createSStructure();
-        //SStructure adjp1 = SaltFactory.createSStructure();
-        //SStructure adjp2 = SaltFactory.createSStructure();
-        //SStructure sbar = SaltFactory.createSStructure();
-        //SStructure s1 = SaltFactory.createSStructure();
-        //SStructure np2 = SaltFactory.createSStructure();
-        //SStructure vp1 = SaltFactory.createSStructure();
-        //SStructure s2 = SaltFactory.createSStructure();
-        //SStructure vp2 = SaltFactory.createSStructure();
-        //SStructure vp3 = SaltFactory.createSStructure();
-
-        //// we add annotations to each SStructure node
-        //root.createAnnotation(null, "cat", "ROOT");
-        //sq.createAnnotation(null, "cat", "SQ");
-        //np1.createAnnotation(null, "cat", "NP");
-        //adjp1.createAnnotation(null, "cat", "ADJP");
-        //adjp2.createAnnotation(null, "cat", "ADJP");
-        //sbar.createAnnotation(null, "cat", "SBAR");
-        //s1.createAnnotation(null, "cat", "S");
-        //np2.createAnnotation(null, "cat", "NP");
-        //vp1.createAnnotation(null, "cat", "VP");
-        //s2.createAnnotation(null, "cat", "S");
-        //vp2.createAnnotation(null, "cat", "VP");
-        //vp3.createAnnotation(null, "cat", "VP");
-
-        //// we add the root node first
-        //getDocument().getDocumentGraph().addNode(root);
-        //SALT_TYPE domRel = SALT_TYPE.SDOMINANCE_RELATION;
-        //// than we add the rest and connect them to each other
-        //getDocument().getDocumentGraph().addNode(root, sq, domRel);
-        //getDocument().getDocumentGraph().addNode(sq, tok_is, domRel); // "Is"
-        //getDocument().getDocumentGraph().addNode(sq, np1, domRel);
-        //getDocument().getDocumentGraph().addNode(np1, tok_thi, domRel); // "this"
-        //getDocument().getDocumentGraph().addNode(np1, tok_exa, domRel); // "example"
-        //getDocument().getDocumentGraph().addNode(sq, adjp1, domRel);
-        //getDocument().getDocumentGraph().addNode(adjp1, adjp2, domRel);
-        //getDocument().getDocumentGraph().addNode(adjp2, tok_mor, domRel); // "more"
-        //getDocument().getDocumentGraph().addNode(adjp2, tok_com, domRel); // "complicated"
-        //getDocument().getDocumentGraph().addNode(adjp1, sbar, domRel);
-        //getDocument().getDocumentGraph().addNode(sbar, tok_tha, domRel); // "than"
-        //getDocument().getDocumentGraph().addNode(sbar, s1, domRel);
-        //getDocument().getDocumentGraph().addNode(s1, np2, domRel);
-        //getDocument().getDocumentGraph().addNode(np2, tok_it, domRel); // "it"
-        //getDocument().getDocumentGraph().addNode(s1, vp1, domRel);
-        //getDocument().getDocumentGraph().addNode(vp1, tok_app, domRel); // "appears"
-        //getDocument().getDocumentGraph().addNode(vp1, s2, domRel);
-        //getDocument().getDocumentGraph().addNode(s2, vp2, domRel);
-        //getDocument().getDocumentGraph().addNode(vp2, tok_to, domRel); // "to"
-        //getDocument().getDocumentGraph().addNode(vp2, vp3, domRel);
-        //getDocument().getDocumentGraph().addNode(vp3, tok_be, domRel); // "be"
-        //getDocument().getDocumentGraph().addNode(root, tok_PUN, domRel); // "?"
-
-        //// we set progress to 'done' to notify the user about the process
-        //// status (this is very helpful, especially for longer taking
-        //// processes)
-        //setProgress(1.0);
-
-        //// now we are done and return the status that everything was
-        //// successful
-        //return (DOCUMENT_STATUS.COMPLETED);
     }
 }
 

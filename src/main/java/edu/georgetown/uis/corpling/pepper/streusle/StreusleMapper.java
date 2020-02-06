@@ -53,7 +53,7 @@ public class StreusleMapper extends PepperMapperImpl {
         for (JsonObject sentence : sentences) {
             JsonValue tObj = sentence.get("text");
             sentenceText.append(tObj.asString());
-            sentenceText.append("\t"); // TODO: Is there a better character to separate sentences?
+            sentenceText.append(" ");
         }
         return doc.createTextualDS(sentenceText.toString());
     }
@@ -96,7 +96,7 @@ public class StreusleMapper extends PepperMapperImpl {
             // create the token, being CAREFUL to add the sOffset to account for any sentences before this one
             SToken sToken = doc.createToken(primaryText, sOffset + beginIndex, sOffset + lastTokEndIndex);
             // give the token a name that lets us remember where it was
-            sToken.setName(sentenceId + "_" + ++tokenId); // TODO: make sure this is fine
+            sToken.setName(sentenceId + "_" + ++tokenId);
             sTokens.add(sToken);
         }
 
@@ -266,16 +266,15 @@ public class StreusleMapper extends PepperMapperImpl {
                 SToken head = id2token.get(pieces[0]);
 
                 SPointingRelation rel = SaltFactory.createSPointingRelation();
-                rel.setType("ud");
+                // If we also made this type "ud", cycles could be introduced among all the
+                // SPointingRelations representing "normal" dependencies and extended dependencies.
+                // But SALT permits cycles so long as there is no cycle such that all major and
+                // minor types on the edges in the cycle are all identical.
+                rel.setType("ude");
                 rel.setId(sentenceId + "_extdep_" + pieces[0] + "-ud->" + i);
                 rel.setSource(head);
                 rel.setTarget(child);
-                if (head == null || child == null) {
-                    System.out.println(rel);
-                    System.out.println(head);
-                    System.out.println(child);
-                    System.out.println();
-                }
+
                 // annotate the edge with deprel
                 SAnnotation deprelAnn = SaltFactory.createSAnnotation();
                 deprelAnn.setName("deprel");
@@ -307,6 +306,14 @@ public class StreusleMapper extends PepperMapperImpl {
         }
     }
 
+    /**
+     * For use with SMWE and WMWE fields. Creates an SSpan for every {S,W}MWE.
+     * @param doc
+     * @param sentenceId
+     * @param sTokens
+     * @param tokens
+     * @param strong set to false if using for WMWE
+     */
     private void processMWEField(SDocumentGraph doc, String sentenceId,
                                  List<SToken> sTokens, List<JsonObject> tokens, boolean strong) {
         // maps strong multiword expression ID to list of token IDs that are a part of it, both 1-indexed.
@@ -351,9 +358,7 @@ public class StreusleMapper extends PepperMapperImpl {
                 mweTokens.add(sTokens.get(tokenId - 1));
             }
 
-            // TODO: OK to use a Span?
             SSpan mweSpan = doc.createSpan(mweTokens);
-            // TODO: seems like it didn't like setId, check with Amir
             mweSpan.setName(sentenceId + (strong ? "_SMWE_" : "_WMWE_") + mweId);
         }
     }
@@ -405,7 +410,8 @@ public class StreusleMapper extends PepperMapperImpl {
         // and add a sentence span, including any etoks
         SSpan sentenceSpan = doc.createSpan(sTokens);
         sentenceSpan.createAnnotation(null, "sent_id", sentenceId);
-        sentenceSpan.setName(sentenceId); // TODO: make sure sentence spanning like this is fine
+        // compatibility with the CONLL module: https://github.com/korpling/pepperModules-CoNLLModules/blob/154f84f0bd6cd6dd4bee8f066aad4d118b5cabe3/src/main/java/org/corpus_tools/peppermodules/conll/Conll2SaltMapper.java#L565
+        sentenceSpan.createAnnotation(null, "CAT", "S");
 
         // column 3, LEMMA
         processSimpleStringField(sTokens, tokens, "lemma", "lemma");
@@ -428,8 +434,10 @@ public class StreusleMapper extends PepperMapperImpl {
         // column 12, LEXCAT
         processSimpleStringField(sTokens, tokens, "lexcat", "lexcat");
         // column 13, LEXLEMMA
-        processSimpleStringField(sTokens, tokens, "lexlemma", "lexlemma");
+        // do nothing: this column contains all the lemmas used in a SMWE if the SMWE begins at this token.
+        //processSimpleStringField(sTokens, tokens, "lexlemma", "lexlemma");
         // column 14, SS
+        //TODO: this isn't actually working, need to look at the "swes" key
         processSimpleStringField(sTokens, tokens, "ss", "ss");
         // column 15, SS2
         processSimpleStringField(sTokens, tokens, "ss2", "ss2");
@@ -439,8 +447,6 @@ public class StreusleMapper extends PepperMapperImpl {
         // currently not used, so do nothing
         // column 18, WLEMMA
         // do nothing: this column contains all the lemmas used in a WMWE if the WMWE begins at this token.
-        // we already have this in the span, so we don't need to do anything
-        // TODO: check with Nathan to make sure this is OK
         // column 19, LEXTAG
         processSimpleStringField(sTokens, tokens, "lextag", "lextag");
     }
@@ -472,9 +478,7 @@ public class StreusleMapper extends PepperMapperImpl {
 
         // make and hold on to a layer reference for enhanced dependencies: any relation
         SLayer edeps = SaltFactory.createSLayer();
-        // TODO: is there anything else we should do? check with Amir
         edeps.setName("edeps");
-        //edeps.setId("edeps");
 
         // process each sentence independently
         for (JsonObject sentence : sentences) {

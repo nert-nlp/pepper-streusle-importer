@@ -10,8 +10,7 @@ import org.corpus_tools.pepper.impl.PepperMapperImpl;
 import org.corpus_tools.salt.SaltFactory;
 import org.corpus_tools.salt.common.*;
 import org.corpus_tools.salt.core.SAnnotation;
-import org.corpus_tools.salt.core.SLayer;
-import org.eclipse.emf.common.util.URI;
+import org.corpus_tools.salt.core.SLayer;import org.eclipse.emf.common.util.URI;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.eclipsesource.json.Json;
@@ -20,6 +19,21 @@ import com.eclipsesource.json.JsonValue;
 
 public class StreusleMapper extends PepperMapperImpl {
     private static final Logger logger = LoggerFactory.getLogger(StreusleImporter.class);
+
+    /**
+     * Many columns are simply an arbitrary string we associate with an SAnnotation. Use this function to handle them.
+     */
+    private void processSimpleStringField(List<SToken> sTokens, List<JsonObject> tokens,
+                                          String jsonName, String annotationName) {
+        for (int i = 0; i < sTokens.size(); i++) {
+            JsonValue jsonValue = tokens.get(i).asObject().get(jsonName);
+            if (jsonValue == null || jsonValue.isNull()) {
+                continue;
+            }
+            SToken sToken = sTokens.get(i);
+            annotateToken(sToken, annotationName, jsonValue.asString());
+        }
+    }
 
     private void annotateToken(SToken token, String key, String value) {
         SAnnotation ann = SaltFactory.createSAnnotation();
@@ -58,10 +72,11 @@ public class StreusleMapper extends PepperMapperImpl {
      *                indexes apply for the whole document text, not just for this sentence
      * @return The tokens that were created for this sentence
      */
-    private List<SToken> processWordField(SDocumentGraph doc, List<JsonObject> tokens,
+    private List<SToken> processWordField(SDocumentGraph doc, String sentenceId, List<JsonObject> tokens,
                                           STextualDS primaryText, String sentenceString, int sOffset) {
         List<SToken> sTokens = new ArrayList<>();
         int lastTokEndIndex = 0;
+        int tokenId = 0;
         for (JsonObject token : tokens) {
             // what do we need to look for? simple, the next token in the sentence that hasn't been processed
             String tokenString = token.get("word").asString();
@@ -80,10 +95,56 @@ public class StreusleMapper extends PepperMapperImpl {
             lastTokEndIndex = beginIndex + tokenString.length();
             // create the token, being CAREFUL to add the sOffset to account for any sentences before this one
             SToken sToken = doc.createToken(primaryText, sOffset + beginIndex, sOffset + lastTokEndIndex);
+            // give the token a name that lets us remember where it was
+            sToken.setName(sentenceId + "_" + ++tokenId); // TODO: make sure this is fine
             sTokens.add(sToken);
         }
 
         return sTokens;
+    }
+
+    /**
+     * Ellipsis tokens are stored in a separate key, "etoks", and so after we've processed regular tokens
+     * we need to handle them as well. In addition to creating the token and annotating it for its ID,
+     * we'll also need to insert (1) it and (2) its JsonObject into sTokens and tokens AND update the ID
+     * to SToken index id2token. After this function, all other functions will think an ellipsis token
+     * is just any other old token.
+     */
+    private void processEtoks(SDocumentGraph doc, String sentenceId,
+                              List<SToken> sTokens, List<JsonObject> tokens, JsonObject sentence,
+                              STextualDS primaryText, int sOffset, Map<String, SToken> id2token) {
+        JsonArray eTokenArray = sentence.get("etoks").asArray();
+        List<JsonObject> eTokens = new ArrayList<>();
+        for (JsonValue eToken : eTokenArray) {
+            eTokens.add(eToken.asObject());
+        }
+
+        for (JsonObject eTokenObject : eTokens) {
+            JsonArray idArray = eTokenObject.get("#").asArray();
+            // e.g. "10"
+            String baseTokenId = Integer.toString(idArray.get(0).asInt());
+            // e.g. "1"
+            int eTokenCounter = idArray.get(1).asInt();
+            // e.g. "10.1"
+            String eTokenId = idArray.get(2).asString();
+
+            // get a ref and index for the base token the etok appears after
+            int baseTokenIndex = 0;
+            while (!sTokens.get(baseTokenIndex)
+                    .getAnnotation("conllu_id").getValue().equals(baseTokenId)) {
+                baseTokenIndex++;
+            }
+
+            // insert the etok as a zero-width token and also set the conllu_id
+            SToken eToken = doc.createToken(primaryText, sOffset, sOffset);
+            eToken.setName(sentenceId + "_" + eTokenId);
+            annotateToken(eToken, "conllu_id", eTokenId);
+            id2token.put(eTokenId, eToken);
+
+            // add them to our lists so that for the rest of processing they'll be treated as any other token
+            sTokens.add(baseTokenIndex + eTokenCounter, eToken);
+            tokens.add(baseTokenIndex + eTokenCounter, eTokenObject);
+        }
     }
 
     /**
@@ -106,48 +167,6 @@ public class StreusleMapper extends PepperMapperImpl {
         }
 
         return id2token;
-    }
-
-    /**
-     * Annotates each token with its lemma under the key "lemma"
-     */
-    private void processLemmaField(List<SToken> sTokens, List<JsonObject> tokens) {
-        for (int i = 0; i < sTokens.size(); i++) {
-            JsonValue jsonLemmaVal = tokens.get(i).asObject().get("lemma");
-            if (jsonLemmaVal == null || jsonLemmaVal.isNull()) {
-                continue;
-            }
-            SToken sToken = sTokens.get(i);
-            annotateToken(sToken, "lemma", jsonLemmaVal.asString());
-        }
-    }
-
-    /**
-     * Annotates each token with its universal part of speech under the key "upos"
-     */
-    private void processUposField(List<SToken> sTokens, List<JsonObject> tokens) {
-        for (int i = 0; i < sTokens.size(); i++) {
-            JsonValue jsonUposVal = tokens.get(i).asObject().get("upos");
-            if (jsonUposVal == null || jsonUposVal.isNull()) {
-                continue;
-            }
-            SToken sToken = sTokens.get(i);
-            annotateToken(sToken, "upos", jsonUposVal.asString());
-        }
-    }
-
-    /**
-     * Annotates each token with its external part of speech under the key "pos"
-     */
-    private void processXposField(List<SToken> sTokens, List<JsonObject> tokens) {
-        for (int i = 0; i < sTokens.size(); i++) {
-            JsonValue jsonXposVal = tokens.get(i).asObject().get("xpos");
-            if (jsonXposVal == null || jsonXposVal.isNull()) {
-                continue;
-            }
-            SToken sToken = sTokens.get(i);
-            annotateToken(sToken, "pos", jsonXposVal.asString());
-        }
     }
 
     /**
@@ -175,7 +194,7 @@ public class StreusleMapper extends PepperMapperImpl {
      *         the ID of the parent of a relation pointing to the sToken at that index, if there was any.
      *         We need this later to avoid duplicating relations.
      */
-    private List<String> processHeadAndDeprelField(SDocumentGraph doc, Map<String, SToken> id2token,
+    private List<String> processHeadAndDeprelField(SDocumentGraph doc, String sentenceId, Map<String, SToken> id2token,
                                                     List<SToken> sTokens, List<JsonObject> tokens) {
         List<String> headIds = new ArrayList<>();
         for (int i = 0; i < sTokens.size(); i++) {
@@ -190,12 +209,14 @@ public class StreusleMapper extends PepperMapperImpl {
                 continue;
             }
 
+            String headIndex = Integer.toString(jsonHeadVal.asInt());
             SToken child = sTokens.get(i);
-            SToken head = id2token.get(Integer.toString(jsonHeadVal.asInt()));
+            SToken head = id2token.get(headIndex);
 
             // model a syntactic dependency as an SPointingRelation going from head to child
             SPointingRelation rel = SaltFactory.createSPointingRelation();
             rel.setType("ud");
+            rel.setId(sentenceId + "_dep_" + headIndex + "-ud->" + i);
             rel.setSource(head);
             rel.setTarget(child);
 
@@ -213,11 +234,11 @@ public class StreusleMapper extends PepperMapperImpl {
     }
 
     // caution: this is called "edeps" in the JSON, but "DEPS" in the documentation
-
     /**
      * Handle enhanced dependencies. Careful, the JSON field name is "edeps", but the CONLLU spec
      * refers to this column as "DEPS". We avoid processing any dependencies that were already added.
      * @param doc
+     * @param sentenceId
      * @param id2token CONLLU ID to SToken
      * @param sTokens SALT tokens
      * @param tokens JSON tokens
@@ -225,8 +246,9 @@ public class StreusleMapper extends PepperMapperImpl {
      * @param headIdsAlreadyProcessed A list of head IDs that will be used for each token to ignore a dependency
      *                                that has already been processed.
      */
-    private void processDepsField(SDocumentGraph doc, Map<String, SToken> id2token, List<SToken> sTokens,
-                                  List<JsonObject> tokens, SLayer edepsLayer, List<String> headIdsAlreadyProcessed) {
+    private void processDepsField(SDocumentGraph doc, String sentenceId, Map<String, SToken> id2token,
+                                  List<SToken> sTokens, List<JsonObject> tokens, SLayer edepsLayer,
+                                  List<String> headIdsAlreadyProcessed) {
         for (int i = 0; i < sTokens.size(); i++) {
             JsonValue jsonDepsVal = tokens.get(i).asObject().get("edeps");
             if (jsonDepsVal == null || jsonDepsVal.isNull()) {
@@ -245,9 +267,15 @@ public class StreusleMapper extends PepperMapperImpl {
 
                 SPointingRelation rel = SaltFactory.createSPointingRelation();
                 rel.setType("ud");
+                rel.setId(sentenceId + "_extdep_" + pieces[0] + "-ud->" + i);
                 rel.setSource(head);
                 rel.setTarget(child);
-
+                if (head == null || child == null) {
+                    System.out.println(rel);
+                    System.out.println(head);
+                    System.out.println(child);
+                    System.out.println();
+                }
                 // annotate the edge with deprel
                 SAnnotation deprelAnn = SaltFactory.createSAnnotation();
                 deprelAnn.setName("deprel");
@@ -256,6 +284,7 @@ public class StreusleMapper extends PepperMapperImpl {
                 String deprelVal = String.join(":", otherPieces);
                 deprelAnn.setValue(deprelVal);
                 rel.addAnnotation(deprelAnn);
+                edepsLayer.addRelation(rel);
             }
         }
     }
@@ -278,17 +307,56 @@ public class StreusleMapper extends PepperMapperImpl {
         }
     }
 
-    // For CONLLULEX
-    private void processSmweField(List<SToken> sTokens, List<JsonObject> tokens) {}
-    private void processLexcatField(List<SToken> sTokens, List<JsonObject> tokens) {}
-    private void processLexlemmaField(List<SToken> sTokens, List<JsonObject> tokens) {}
-    private void processSsField(List<SToken> sTokens, List<JsonObject> tokens) {}
-    private void processSs2Field(List<SToken> sTokens, List<JsonObject> tokens) {}
-    private void processWmweField(List<SToken> sTokens, List<JsonObject> tokens) {}
-    private void processWcatField(List<SToken> sTokens, List<JsonObject> tokens) {}
-    private void processWlemmaField(List<SToken> sTokens, List<JsonObject> tokens) {}
-    private void processLextagField(List<SToken> sTokens, List<JsonObject> tokens) {}
-    // consider using dominance relations for discontinuous spans
+    private void processMWEField(SDocumentGraph doc, String sentenceId,
+                                 List<SToken> sTokens, List<JsonObject> tokens, boolean strong) {
+        // maps strong multiword expression ID to list of token IDs that are a part of it, both 1-indexed.
+        Map<Integer, List<Integer>> mwes = new HashMap<>();
+
+        // populate the map by reading the json
+        for (int i = 0; i < tokens.size(); i++) {
+            JsonObject token = tokens.get(i);
+            JsonValue mweVal = token.get(strong ? "smwe" : "wmwe");
+            if (mweVal == null || mweVal.isNull() || !mweVal.isArray()) {
+                continue;
+            }
+
+            // the second part of this array tells us the order of this word in the MWE, but this is useless
+            // for us, so ignore it
+            int mweId = mweVal.asArray().get(0).asInt();
+
+            // prepare the list if this is the first time we've seen this mwe id
+            if (!mwes.containsKey(mweId)) {
+                mwes.put(mweId, new ArrayList<>());
+            }
+            mwes.get(mweId).add(i + 1);
+        }
+
+        // ensure that token IDs increase monotonically, as they ought to
+        for (Integer mweId  : mwes.keySet()) {
+            List<Integer> tokenIds = mwes.get(mweId);
+            for (int i = 0; i < tokenIds.size() - 1; i++) {
+                if (tokenIds.get(i) >= tokenIds.get(i + 1)) {
+                    throw new RuntimeException((strong ? "SMWE " : "WMWE ") + mweId
+                            + " in sentence " + sentenceId
+                            + " has non-monotonically increasing token indexes.");
+                }
+            }
+        }
+
+        // turn the map into a bunch of spans
+        for (int mweId : mwes.keySet()) {
+            List<SToken> mweTokens = new ArrayList<>();
+            for (int tokenId : mwes.get(mweId)) {
+                // subtract 1 because tokenIds are 1-indexed
+                mweTokens.add(sTokens.get(tokenId - 1));
+            }
+
+            // TODO: OK to use a Span?
+            SSpan mweSpan = doc.createSpan(mweTokens);
+            // TODO: seems like it didn't like setId, check with Amir
+            mweSpan.setName(sentenceId + (strong ? "_SMWE_" : "_WMWE_") + mweId);
+        }
+    }
 
     /**
      * Top-level function invoked for each sentence in the document. The "toks" property
@@ -303,6 +371,7 @@ public class StreusleMapper extends PepperMapperImpl {
      *                 "swes", "smwes", and "wmwes".
      */
     private void processSentence(SDocumentGraph doc, SLayer edepsLayer, STextualDS primaryText, JsonObject sentence) {
+        String sentenceId = sentence.get("sent_id").asString();
         // get the sentence text, e.g. "My 8 year old daughter loves this place."
         String sentenceString = sentence.get("text").asString();
 
@@ -326,23 +395,54 @@ public class StreusleMapper extends PepperMapperImpl {
         // would maybe be marginally more performant to process annotations all in one loop, but I will
         // prioritize clarity of code over performance
         // column 2, FORM
-        List<SToken> sTokens = processWordField(doc, tokens, primaryText, sentenceString, sOffset);
-        // column 1, ID
+        // at this step, we also need to tokenize (incl. any ellipsis tokens)
+        List<SToken> sTokens = processWordField(doc, sentenceId, tokens, primaryText, sentenceString, sOffset);
+        // column 1, ID, for non-ellipsis tokens. we need to do this here and not later since ellipsis tokens need
+        // to know what tokens' IDs are
         Map<String, SToken> id2token = processIdField(sTokens, tokens);
+        processEtoks(doc, sentenceId, sTokens, tokens, sentence, primaryText, sOffset, id2token);
+
+        // and add a sentence span, including any etoks
+        SSpan sentenceSpan = doc.createSpan(sTokens);
+        sentenceSpan.createAnnotation(null, "sent_id", sentenceId);
+        sentenceSpan.setName(sentenceId); // TODO: make sure sentence spanning like this is fine
+
         // column 3, LEMMA
-        processLemmaField(sTokens, tokens);
+        processSimpleStringField(sTokens, tokens, "lemma", "lemma");
         // column 4, UPOS
-        processUposField(sTokens, tokens);
+        processSimpleStringField(sTokens, tokens, "upos", "upos");
         // column 5, XPOS
-        processXposField(sTokens, tokens);
+        processSimpleStringField(sTokens, tokens, "xpos", "pos");
         // column 6, FEATS
         processFeatsField(sTokens, tokens);
         // columns 7 and 8, HEAD and DEPREL
-        List<String> headIdsAlreadyProcessed = processHeadAndDeprelField(doc, id2token, sTokens, tokens);
+        List<String> headIdsAlreadyProcessed = processHeadAndDeprelField(doc, sentenceId, id2token, sTokens, tokens);
         // column 9, DEPS
-        processDepsField(doc, id2token, sTokens, tokens, edepsLayer, headIdsAlreadyProcessed);
+        processDepsField(doc, sentenceId, id2token, sTokens, tokens, edepsLayer, headIdsAlreadyProcessed);
         // column 10, MISC
         processMiscField(sTokens, tokens);
+
+        /* CONLLULEX-specific columns */
+        // column 11, SMWE
+        processMWEField(doc, sentenceId, sTokens, tokens, true);
+        // column 12, LEXCAT
+        processSimpleStringField(sTokens, tokens, "lexcat", "lexcat");
+        // column 13, LEXLEMMA
+        processSimpleStringField(sTokens, tokens, "lexlemma", "lexlemma");
+        // column 14, SS
+        processSimpleStringField(sTokens, tokens, "ss", "ss");
+        // column 15, SS2
+        processSimpleStringField(sTokens, tokens, "ss2", "ss2");
+        // column 16, WMWE
+        processMWEField(doc, sentenceId, sTokens, tokens, false);
+        // column 17, WCAT
+        // currently not used, so do nothing
+        // column 18, WLEMMA
+        // do nothing: this column contains all the lemmas used in a WMWE if the WMWE begins at this token.
+        // we already have this in the span, so we don't need to do anything
+        // TODO: check with Nathan to make sure this is OK
+        // column 19, LEXTAG
+        processSimpleStringField(sTokens, tokens, "lextag", "lextag");
     }
 
     /**
@@ -361,7 +461,6 @@ public class StreusleMapper extends PepperMapperImpl {
         // valid first.
 
         // Cast each sentence into a JsonObject and keep them in a list, we'll need to loop over them.
-
         List<JsonObject> sentences = new ArrayList<>();
         for (JsonValue sentenceValue : jsonRoot.asArray()) {
             JsonObject sentence = sentenceValue.asObject();
@@ -373,14 +472,17 @@ public class StreusleMapper extends PepperMapperImpl {
 
         // make and hold on to a layer reference for enhanced dependencies: any relation
         SLayer edeps = SaltFactory.createSLayer();
+        // TODO: is there anything else we should do? check with Amir
         edeps.setName("edeps");
-        edeps.setId("edeps");
-        doc.addLayer(edeps);
+        //edeps.setId("edeps");
 
         // process each sentence independently
         for (JsonObject sentence : sentences) {
             processSentence(doc, edeps, primaryText, sentence);
         }
+
+        // add the layer after we're done adding rels to it
+        doc.addLayer(edeps);
     }
 
     /**

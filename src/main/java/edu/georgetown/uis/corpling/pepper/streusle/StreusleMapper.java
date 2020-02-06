@@ -10,7 +10,9 @@ import org.corpus_tools.pepper.impl.PepperMapperImpl;
 import org.corpus_tools.salt.SaltFactory;
 import org.corpus_tools.salt.common.*;
 import org.corpus_tools.salt.core.SAnnotation;
-import org.corpus_tools.salt.core.SLayer;import org.eclipse.emf.common.util.URI;
+import org.corpus_tools.salt.core.SLayer;
+import org.corpus_tools.salt.core.SNode;
+import org.eclipse.emf.common.util.URI;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.eclipsesource.json.Json;
@@ -20,26 +22,11 @@ import com.eclipsesource.json.JsonValue;
 public class StreusleMapper extends PepperMapperImpl {
     private static final Logger logger = LoggerFactory.getLogger(StreusleImporter.class);
 
-    /**
-     * Many columns are simply an arbitrary string we associate with an SAnnotation. Use this function to handle them.
-     */
-    private void processSimpleStringField(List<SToken> sTokens, List<JsonObject> tokens,
-                                          String jsonName, String annotationName) {
-        for (int i = 0; i < sTokens.size(); i++) {
-            JsonValue jsonValue = tokens.get(i).asObject().get(jsonName);
-            if (jsonValue == null || jsonValue.isNull()) {
-                continue;
-            }
-            SToken sToken = sTokens.get(i);
-            annotateToken(sToken, annotationName, jsonValue.asString());
-        }
-    }
-
-    private void annotateToken(SToken token, String key, String value) {
+    private void annotateNode(SNode node, String key, String value) {
         SAnnotation ann = SaltFactory.createSAnnotation();
         ann.setName(key);
         ann.setValue(value);
-        token.addAnnotation(ann);
+        node.addAnnotation(ann);
     }
 
     /**
@@ -110,9 +97,9 @@ public class StreusleMapper extends PepperMapperImpl {
      * to SToken index id2token. After this function, all other functions will think an ellipsis token
      * is just any other old token.
      */
-    private void processEtoks(SDocumentGraph doc, String sentenceId,
-                              List<SToken> sTokens, List<JsonObject> tokens, JsonObject sentence,
-                              STextualDS primaryText, int sOffset, Map<String, SToken> id2token) {
+    private void mergeEtoks(SDocumentGraph doc, String sentenceId,
+                            List<SToken> sTokens, List<JsonObject> tokens, JsonObject sentence,
+                            STextualDS primaryText, int sOffset, Map<String, SToken> id2token) {
         JsonArray eTokenArray = sentence.get("etoks").asArray();
         List<JsonObject> eTokens = new ArrayList<>();
         for (JsonValue eToken : eTokenArray) {
@@ -138,7 +125,7 @@ public class StreusleMapper extends PepperMapperImpl {
             // insert the etok as a zero-width token and also set the conllu_id
             SToken eToken = doc.createToken(primaryText, sOffset, sOffset);
             eToken.setName(sentenceId + "_" + eTokenId);
-            annotateToken(eToken, "conllu_id", eTokenId);
+            annotateNode(eToken, "conllu_id", eTokenId);
             id2token.put(eTokenId, eToken);
 
             // add them to our lists so that for the rest of processing they'll be treated as any other token
@@ -148,11 +135,89 @@ public class StreusleMapper extends PepperMapperImpl {
     }
 
     /**
+     * Annotate single-word expressions with supersense and lexcat information.
+     */
+    private void processSwes(JsonObject sentence, Map<String, SToken> id2token) {
+        // a JsonObject mapping an ID like "1" to another JsonObject
+        JsonObject swes = sentence.get("swes").asObject();
+
+        // loop over keys
+        for (String sweId: swes.names()) {
+            JsonObject sweObj = swes.get(sweId).asObject();
+            String ss = sweObj.get("ss").isNull() ? null : sweObj.get("ss").asString();
+            String ss2 = sweObj.get("ss2").isNull() ? null : sweObj.get("ss2").asString();
+            String lexcat = sweObj.get("lexcat").isNull() ? null : sweObj.get("lexcat").asString();
+            for (JsonValue tokNum : sweObj.get("toknums").asArray()) {
+                String tokId = Integer.toString(tokNum.asInt());
+                SToken sToken = id2token.get(tokId);
+                if (ss != null) {
+                    annotateNode(sToken, "ss", ss);
+                }
+                if (ss2 != null) {
+                    annotateNode(sToken, "ss2", ss2);
+                }
+                if (lexcat != null) {
+                    annotateNode(sToken, "lexcat", lexcat);
+                }
+            }
+        }
+    }
+
+    /**
+     * Annotate strong or single multiword expressions with supersense and lexcat information.
+     * We rely on the SSpans that were already created for MWEs, and we rely on the id2mwe map
+     * to find them based on the ID we find under the "smwes" or "wmwes" keys.
+     */
+    private void processMwes(JsonObject sentence, Map<Integer, SSpan> id2mwe, boolean strong) {
+        // a JsonObject mapping an ID like "1" to another JsonObject
+        JsonObject mwes = sentence.get(strong ? "smwes" : "wmwes").asObject();
+
+        // loop over keys
+        for (String mweId: mwes.names()) {
+            JsonObject mweObj = mwes.get(mweId).asObject();
+
+            String ss = null, ss2 = null, lexcat = null;
+            if (mweObj.get("ss") != null && !mweObj.get("ss").isNull()) {
+                ss = mweObj.get("ss").asString();
+            }
+            if (mweObj.get("ss2") != null && !mweObj.get("ss2").isNull()) {
+                ss2 = mweObj.get("ss2").asString();
+            }
+            if (mweObj.get("lexcat") != null && !mweObj.get("lexcat").isNull()) {
+                lexcat = mweObj.get("lexcat").asString();
+            }
+            SSpan mweSpan = id2mwe.get(Integer.parseInt(mweId));
+            if (ss != null) {
+                annotateNode(mweSpan, "ss", ss);
+            }
+            if (ss2 != null) {
+                annotateNode(mweSpan, "ss2", ss2);
+            }
+            if (lexcat != null) {
+                annotateNode(mweSpan, "lexcat", lexcat);
+            }
+        }
+    }
+
+
+    /**
+     * Many columns are simply an arbitrary string we associate with an SAnnotation. Use this function to handle them.
+     */
+    private void processSimpleStringField(List<SToken> sTokens, List<JsonObject> tokens,
+                                          String jsonName, String annotationName) {
+        for (int i = 0; i < sTokens.size(); i++) {
+            JsonValue jsonValue = tokens.get(i).asObject().get(jsonName);
+            if (jsonValue == null || jsonValue.isNull()) {
+                continue;
+            }
+            SToken sToken = sTokens.get(i);
+            annotateNode(sToken, annotationName, jsonValue.asString());
+        }
+    }
+    /**
      * Annotates tokens with their CONLLU ID and also returns a map from CONLLU ID to SToken--useful for
      * adding dependencies later. Why is it Map<String and not Map<Integer? Because non-integral CONLLU
-     * IDs are allowed: supertokens (e.g. 5-6) and ellipsis tokens (e.g. 5.1). Since STREUSLE currently
-     * (2020/01/31) doesn't have either extended token type, we don't implement support for them, but
-     * we keep the type in the map String as a reminder.
+     * IDs are allowed: supertokens (e.g. 5-6) and ellipsis tokens (e.g. 5.1).
      * @return A map from 1-indexed CONLLU ID (e.g. 5) as a string to the SToken instance.
      */
     private Map<String, SToken> processIdField(List<SToken> sTokens, List<JsonObject> tokens) {
@@ -162,7 +227,7 @@ public class StreusleMapper extends PepperMapperImpl {
             JsonValue idVal = tokens.get(i).asObject().get("#");
             String id = Integer.toString(idVal.asInt());
             SToken sToken = sTokens.get(i);
-            annotateToken(sToken, "conllu_id", id);
+            annotateNode(sToken, "conllu_id", id);
             id2token.put(id, sToken);
         }
 
@@ -183,7 +248,7 @@ public class StreusleMapper extends PepperMapperImpl {
             SToken sToken = sTokens.get(i);
             for (String feat : jsonFeatsVal.asString().split("\\|")) {
                 String[] pieces = feat.split("=");
-                annotateToken(sToken, pieces[0], pieces[1]);
+                annotateNode(sToken, pieces[0], pieces[1]);
             }
         }
     }
@@ -301,7 +366,7 @@ public class StreusleMapper extends PepperMapperImpl {
             SToken sToken = sTokens.get(i);
             for (String misc : jsonMiscVal.asString().split("\\|")) {
                 String[] pieces = misc.split("=");
-                annotateToken(sToken, pieces[0], pieces[1]);
+                annotateNode(sToken, pieces[0], pieces[1]);
             }
         }
     }
@@ -313,9 +378,12 @@ public class StreusleMapper extends PepperMapperImpl {
      * @param sTokens
      * @param tokens
      * @param strong set to false if using for WMWE
+     * @returns A mapping from String to MWE span, which we need to annotate later on
      */
-    private void processMWEField(SDocumentGraph doc, String sentenceId,
+    private Map<Integer, SSpan> processMWEField(SDocumentGraph doc, String sentenceId,
                                  List<SToken> sTokens, List<JsonObject> tokens, boolean strong) {
+        // we'll return this at the end
+        Map<Integer, SSpan> id2mwe = new HashMap<>();
         // maps strong multiword expression ID to list of token IDs that are a part of it, both 1-indexed.
         Map<Integer, List<Integer>> mwes = new HashMap<>();
 
@@ -360,7 +428,9 @@ public class StreusleMapper extends PepperMapperImpl {
 
             SSpan mweSpan = doc.createSpan(mweTokens);
             mweSpan.setName(sentenceId + (strong ? "_SMWE_" : "_WMWE_") + mweId);
+            id2mwe.put(mweId, mweSpan);
         }
+        return id2mwe;
     }
 
     /**
@@ -376,6 +446,9 @@ public class StreusleMapper extends PepperMapperImpl {
      *                 "swes", "smwes", and "wmwes".
      */
     private void processSentence(SDocumentGraph doc, SLayer edepsLayer, STextualDS primaryText, JsonObject sentence) {
+        /*\
+        |*| Setup
+        \*/
         String sentenceId = sentence.get("sent_id").asString();
         // get the sentence text, e.g. "My 8 year old daughter loves this place."
         String sentenceString = sentence.get("text").asString();
@@ -396,23 +469,26 @@ public class StreusleMapper extends PepperMapperImpl {
             tokens.add(token.asObject());
         }
 
+        /*\
+        |*| Columns 1-2
+        \*/
         // make the SToken objects by looping over the array--we'll take care of annotations in other loops
         // would maybe be marginally more performant to process annotations all in one loop, but I will
-        // prioritize clarity of code over performance
-        // column 2, FORM
-        // at this step, we also need to tokenize (incl. any ellipsis tokens)
+        // prioritize clarity of code over performance. This handles columns 1 (ID) and 2 (FORM).
         List<SToken> sTokens = processWordField(doc, sentenceId, tokens, primaryText, sentenceString, sOffset);
-        // column 1, ID, for non-ellipsis tokens. we need to do this here and not later since ellipsis tokens need
-        // to know what tokens' IDs are
         Map<String, SToken> id2token = processIdField(sTokens, tokens);
-        processEtoks(doc, sentenceId, sTokens, tokens, sentence, primaryText, sOffset, id2token);
+        // ellipsis toks are stored separately in "etoks"--here, we get them into sTokens and tokens
+        mergeEtoks(doc, sentenceId, sTokens, tokens, sentence, primaryText, sOffset, id2token);
 
-        // and add a sentence span, including any etoks
+        // with our final set of tokens, create a sentence span and annotate it with our ID
         SSpan sentenceSpan = doc.createSpan(sTokens);
-        sentenceSpan.createAnnotation(null, "sent_id", sentenceId);
+        annotateNode(sentenceSpan, "sent_id", sentenceId);
         // compatibility with the CONLL module: https://github.com/korpling/pepperModules-CoNLLModules/blob/154f84f0bd6cd6dd4bee8f066aad4d118b5cabe3/src/main/java/org/corpus_tools/peppermodules/conll/Conll2SaltMapper.java#L565
-        sentenceSpan.createAnnotation(null, "CAT", "S");
+        annotateNode(sentenceSpan, "CAT", "S");
 
+        /*\
+        |*| Columns 3-10
+        \*/
         // column 3, LEMMA
         processSimpleStringField(sTokens, tokens, "lemma", "lemma");
         // column 4, UPOS
@@ -428,27 +504,20 @@ public class StreusleMapper extends PepperMapperImpl {
         // column 10, MISC
         processMiscField(sTokens, tokens);
 
-        /* CONLLULEX-specific columns */
-        // column 11, SMWE
-        processMWEField(doc, sentenceId, sTokens, tokens, true);
-        // column 12, LEXCAT
-        processSimpleStringField(sTokens, tokens, "lexcat", "lexcat");
-        // column 13, LEXLEMMA
-        // do nothing: this column contains all the lemmas used in a SMWE if the SMWE begins at this token.
-        //processSimpleStringField(sTokens, tokens, "lexlemma", "lexlemma");
-        // column 14, SS
-        //TODO: this isn't actually working, need to look at the "swes" key
-        processSimpleStringField(sTokens, tokens, "ss", "ss");
-        // column 15, SS2
-        processSimpleStringField(sTokens, tokens, "ss2", "ss2");
-        // column 16, WMWE
-        processMWEField(doc, sentenceId, sTokens, tokens, false);
-        // column 17, WCAT
-        // currently not used, so do nothing
-        // column 18, WLEMMA
-        // do nothing: this column contains all the lemmas used in a WMWE if the WMWE begins at this token.
-        // column 19, LEXTAG
+        /*\
+        |*| Columns 11-19
+        \*/
+        // do nothing for column 17, currently not used
+        // do nothing for column 13, LEXLEMMA, and column 18, WLEMMA: redundant with other info
+        // SMWE (11), WMWE (16), and LEXTAG (19) are stored directly on "toks", handle them:
+        Map<Integer, SSpan> id2smwe = processMWEField(doc, sentenceId, sTokens, tokens, true);
+        Map<Integer, SSpan> id2wmwe = processMWEField(doc, sentenceId, sTokens, tokens, false);
         processSimpleStringField(sTokens, tokens, "lextag", "lextag");
+
+        // LEXCAT (12), SS (14), and SS2 (15) are stored separately under "mwes", "smwes", and "wmwes"
+        processSwes(sentence, id2token);
+        processMwes(sentence, id2smwe, true);
+        processMwes(sentence, id2wmwe, false);
     }
 
     /**

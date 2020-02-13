@@ -12,6 +12,7 @@ import org.corpus_tools.salt.common.*;
 import org.corpus_tools.salt.core.SAnnotation;
 import org.corpus_tools.salt.core.SLayer;
 import org.corpus_tools.salt.core.SNode;
+import org.corpus_tools.salt.core.SRelation;
 import org.eclipse.emf.common.util.URI;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -298,6 +299,25 @@ public class StreusleMapper extends PepperMapperImpl {
         return headIds;
     }
 
+    /**
+     * Recursive function that checks if there's a cycle between two nodes.
+     * @param start The node we started from.
+     * @param current The node we are currently traversing.
+     * @return true iff a cycle exists between start and current
+     */
+    private boolean cycleCheck(SNode start, SNode current) {
+        if (current == null) {
+            return false;
+        }
+        for (SRelation childRel : current.getOutRelations()) {
+            SNode next = (SNode) childRel.getTarget();
+            if (next == start || cycleCheck(start, next)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // caution: this is called "edeps" in the JSON, but "DEPS" in the documentation
     /**
      * Handle enhanced dependencies. Careful, the JSON field name is "edeps", but the CONLLU spec
@@ -335,8 +355,12 @@ public class StreusleMapper extends PepperMapperImpl {
                 // SPointingRelations representing "normal" dependencies and extended dependencies.
                 // But SALT permits cycles so long as there is no cycle such that all major and
                 // minor types on the edges in the cycle are all identical.
-                rel.setType("ude");
-                rel.setId(sentenceId + "_extdep_" + pieces[0] + "-ud->" + i);
+                // It is also for this reason that we need to check if introducing this edge
+                // would create a cycle, and if so, break the cycle by changing edge type to
+                // "udecycle".
+                String edgeType = cycleCheck(head, child) ? "udecycle" : "ude";
+                rel.setType(edgeType);
+                rel.setId(sentenceId + "_extdep_" + pieces[0] + "-" + edgeType + "->" + i);
                 rel.setSource(head);
                 rel.setTarget(child);
 

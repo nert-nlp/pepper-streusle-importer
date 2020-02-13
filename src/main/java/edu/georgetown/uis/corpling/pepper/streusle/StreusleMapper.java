@@ -264,8 +264,9 @@ public class StreusleMapper extends PepperMapperImpl {
                                                     List<SToken> sTokens, List<JsonObject> tokens) {
         List<String> headIds = new ArrayList<>();
         for (int i = 0; i < sTokens.size(); i++) {
-            JsonValue jsonHeadVal = tokens.get(i).asObject().get("head");
-            JsonValue jsonDeprelVal = tokens.get(i).asObject().get("deprel");
+            JsonObject tokenObj = tokens.get(i).asObject();
+            JsonValue jsonHeadVal = tokenObj.get("head");
+            JsonValue jsonDeprelVal = tokenObj.get("deprel");
             if (jsonHeadVal == null || jsonHeadVal.isNull()
                     || jsonDeprelVal == null || jsonDeprelVal.isNull()
                     // root element, ignore because it is by convention not represented in SALT
@@ -285,6 +286,16 @@ public class StreusleMapper extends PepperMapperImpl {
             rel.setId(sentenceId + "_dep_" + headIndex + "-ud->" + i);
             rel.setSource(head);
             rel.setTarget(child);
+
+            // annotate if not in edeps
+            String edepsEquiv = jsonHeadVal.asDouble() + ":" + jsonDeprelVal.asString();
+            String edepsString = tokenObj.get("edeps").asString();
+            if (!edepsString.contains(edepsEquiv)) {
+                SAnnotation notInEdepsAnn = SaltFactory.createSAnnotation();
+                notInEdepsAnn.setName("in_edeps");
+                notInEdepsAnn.setValue("no");
+                rel.addAnnotation(notInEdepsAnn);
+            }
 
             // annotate the edge with deprel
             SAnnotation deprelAnn = SaltFactory.createSAnnotation();

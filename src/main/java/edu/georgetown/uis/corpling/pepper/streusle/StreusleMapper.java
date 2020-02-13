@@ -288,7 +288,11 @@ public class StreusleMapper extends PepperMapperImpl {
             rel.setTarget(child);
 
             // annotate if not in edeps
-            String edepsEquiv = jsonHeadVal.asDouble() + ":" + jsonDeprelVal.asString();
+            String edepsEquiv = Double.toString(jsonHeadVal.asDouble());
+            if (edepsEquiv.endsWith(".0")) {
+                edepsEquiv = edepsEquiv.substring(0, edepsEquiv.length() - 2);
+            }
+            edepsEquiv += ":" + jsonDeprelVal.asString();
             String edepsString = tokenObj.get("edeps").asString();
             if (!edepsString.contains(edepsEquiv)) {
                 SAnnotation notInEdepsAnn = SaltFactory.createSAnnotation();

@@ -136,9 +136,25 @@ public class StreusleMapper extends PepperMapperImpl {
     }
 
     /**
+     * Annotate words with their lextag. We make a span because ANNIS's grid visualizer doesn't
+     * mixing span annotations and token annotations.
+     */
+    private void processLextag(SDocumentGraph doc, List<SToken> sTokens, List<JsonObject> tokens) {
+        for (int i = 0; i < sTokens.size(); i++) {
+            JsonValue jsonValue = tokens.get(i).asObject().get("lextag");
+            if (jsonValue == null || jsonValue.isNull()) {
+                continue;
+            }
+            SToken sToken = sTokens.get(i);
+            SSpan span = doc.createSpan(sToken);
+            annotateNode(span, "lextag", jsonValue.asString());
+        }
+    }
+
+    /**
      * Annotate single-word expressions with supersense and lexcat information.
      */
-    private void processSwes(JsonObject sentence, Map<String, SToken> id2token) {
+    private void processSwes(SDocumentGraph doc, JsonObject sentence, Map<String, SToken> id2token) {
         // a JsonObject mapping an ID like "1" to another JsonObject
         JsonObject swes = sentence.get("swes").asObject();
 
@@ -151,14 +167,15 @@ public class StreusleMapper extends PepperMapperImpl {
             for (JsonValue tokNum : sweObj.get("toknums").asArray()) {
                 String tokId = Integer.toString(tokNum.asInt());
                 SToken sToken = id2token.get(tokId);
+                SSpan span = doc.createSpan(sToken);
                 if (ss != null) {
-                    annotateNode(sToken, "ss", ss);
+                    annotateNode(span, "ss", ss);
                 }
                 if (ss2 != null) {
-                    annotateNode(sToken, "ss2", ss2);
+                    annotateNode(span, "ss2", ss2);
                 }
                 if (lexcat != null) {
-                    annotateNode(sToken, "lexcat", lexcat);
+                    annotateNode(span, "lexcat", lexcat);
                 }
             }
         }
@@ -343,11 +360,12 @@ public class StreusleMapper extends PepperMapperImpl {
      * @param sTokens SALT tokens
      * @param tokens JSON tokens
      * @param edepsLayer The layer containing the enhanced dependencies.
+     * @param cycleLayer The layer containing the cycle-breaking edges in the edeps layer.
      * @param headIdsAlreadyProcessed A list of head IDs that will be used for each token to ignore a dependency
      *                                that has already been processed.
      */
     private void processDepsField(SDocumentGraph doc, String sentenceId, Map<String, SToken> id2token,
-                                  List<SToken> sTokens, List<JsonObject> tokens, SLayer edepsLayer,
+                                  List<SToken> sTokens, List<JsonObject> tokens, SLayer edepsLayer, SLayer cycleLayer,
                                   List<String> headIdsAlreadyProcessed) {
         for (int i = 0; i < sTokens.size(); i++) {
             JsonValue jsonDepsVal = tokens.get(i).asObject().get("edeps");
@@ -383,11 +401,12 @@ public class StreusleMapper extends PepperMapperImpl {
                 SAnnotation deprelAnn = SaltFactory.createSAnnotation();
                 deprelAnn.setName("deprel");
                 // not as simple as pieces[1]: vals might contain colons like in 5:nmod:poss|...
-                List<String> otherPieces = Arrays.asList(pieces).subList(1, pieces.length - 1);
+                List<String> otherPieces = Arrays.asList(pieces).subList(1, pieces.length);
                 String deprelVal = String.join(":", otherPieces);
+
                 deprelAnn.setValue(deprelVal);
                 rel.addAnnotation(deprelAnn);
-                edepsLayer.addRelation(rel);
+                (edgeType.equals("udecycle") ? cycleLayer : edepsLayer).addRelation(rel);
             }
         }
     }
@@ -479,12 +498,15 @@ public class StreusleMapper extends PepperMapperImpl {
      * a separate function for each column to build up the sentence structure in a
      * programmatically decoupled way.
      * @param doc ref to the SDocumentGraph
+     * @param edepsLayer The layer containing the enhanced dependencies.
+     * @param cycleLayer The layer containing the cycle-breaking edges in the edeps layer.
      * @param primaryText the STextualDS object anchoring all our annotations
      * @param sentence the JSON piece corresponding to this sentence, which is a JSON object
      *                 with fields "sent_id", "streusle_sent_id", "mwe", "toks", "etoks",
      *                 "swes", "smwes", and "wmwes".
      */
-    private void processSentence(SDocumentGraph doc, SLayer edepsLayer, STextualDS primaryText, JsonObject sentence) {
+    private void processSentence(SDocumentGraph doc, SLayer edepsLayer, SLayer cycleLayer,
+                                 STextualDS primaryText, JsonObject sentence) {
         /*\
         |*| Setup
         \*/
@@ -522,7 +544,7 @@ public class StreusleMapper extends PepperMapperImpl {
         // with our final set of tokens, create a sentence span and annotate it with our ID
         SSpan sentenceSpan = doc.createSpan(sTokens);
         annotateNode(sentenceSpan, "sent_id", sentenceId);
-        // compatibility with the CONLL module: https://github.com/korpling/pepperModules-CoNLLModules/blob/154f84f0bd6cd6dd4bee8f066aad4d118b5cabe3/src/main/java/org/corpus_tools/peppermodules/conll/Conll2SaltMapper.java#L565
+        // consistency with the CONLL module: https://github.com/korpling/pepperModules-CoNLLModules/blob/154f84f0bd6cd6dd4bee8f066aad4d118b5cabe3/src/main/java/org/corpus_tools/peppermodules/conll/Conll2SaltMapper.java#L565
         annotateNode(sentenceSpan, "CAT", "S");
 
         /*\
@@ -539,7 +561,7 @@ public class StreusleMapper extends PepperMapperImpl {
         // columns 7 and 8, HEAD and DEPREL
         List<String> headIdsAlreadyProcessed = processHeadAndDeprelField(doc, sentenceId, id2token, sTokens, tokens);
         // column 9, DEPS
-        processDepsField(doc, sentenceId, id2token, sTokens, tokens, edepsLayer, headIdsAlreadyProcessed);
+        processDepsField(doc, sentenceId, id2token, sTokens, tokens, edepsLayer, cycleLayer, headIdsAlreadyProcessed);
         // column 10, MISC
         processMiscField(sTokens, tokens);
 
@@ -551,10 +573,10 @@ public class StreusleMapper extends PepperMapperImpl {
         // SMWE (11), WMWE (16), and LEXTAG (19) are stored directly on "toks", handle them:
         Map<Integer, SSpan> id2smwe = processMWEField(doc, sentenceId, sTokens, tokens, true);
         Map<Integer, SSpan> id2wmwe = processMWEField(doc, sentenceId, sTokens, tokens, false);
-        processSimpleStringField(sTokens, tokens, "lextag", "lextag");
+        processLextag(doc, sTokens, tokens);
 
         // LEXCAT (12), SS (14), and SS2 (15) are stored separately under "mwes", "smwes", and "wmwes"
-        processSwes(sentence, id2token);
+        processSwes(doc, sentence, id2token);
         processMwes(sentence, id2smwe, true);
         processMwes(sentence, id2wmwe, false);
     }
@@ -587,14 +609,17 @@ public class StreusleMapper extends PepperMapperImpl {
         // make and hold on to a layer reference for enhanced dependencies: any relation
         SLayer edeps = SaltFactory.createSLayer();
         edeps.setName("edeps");
+        SLayer cycle = SaltFactory.createSLayer();
+        cycle.setName("cycle");
 
         // process each sentence independently
         for (JsonObject sentence : sentences) {
-            processSentence(doc, edeps, primaryText, sentence);
+            processSentence(doc, edeps, cycle, primaryText, sentence);
         }
 
         // add the layer after we're done adding rels to it
         doc.addLayer(edeps);
+        doc.addLayer(cycle);
     }
 
     /**

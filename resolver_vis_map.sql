@@ -20,3 +20,4 @@ VALUES ('streusle', 'default_ns', 'node', 'grid', 'extra', 'hidden', 999, 'annos
 UPDATE annis343.resolver_vis_map SET display_name='deps' WHERE display_name='ud (default_ns)';
 UPDATE annis343.resolver_vis_map SET display_name='enhanced deps' WHERE display_name='ude (edeps)';
 UPDATE annis343.resolver_vis_map SET display_name='cycle edges' WHERE display_name='udecycle (cycle)';
+UPDATE annis343.resolver_vis_map SET display_name='govobj',"order"=5 WHERE display_name='govobj (govobj)';

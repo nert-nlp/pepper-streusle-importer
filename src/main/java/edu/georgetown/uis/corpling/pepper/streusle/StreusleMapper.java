@@ -186,7 +186,8 @@ public class StreusleMapper extends PepperMapperImpl {
      * We rely on the SSpans that were already created for MWEs, and we rely on the id2mwe map
      * to find them based on the ID we find under the "smwes" or "wmwes" keys.
      */
-    private void processMwes(JsonObject sentence, Map<Integer, SSpan> id2mwe, boolean strong) {
+    private void processMwes(JsonObject sentence, Map<Integer, SSpan> id2mwe,
+                             Map<String, SToken> id2token, SLayer govobj, boolean strong) {
         // a JsonObject mapping an ID like "1" to another JsonObject
         JsonObject mwes = sentence.get(strong ? "smwes" : "wmwes").asObject();
 
@@ -195,6 +196,7 @@ public class StreusleMapper extends PepperMapperImpl {
             JsonObject mweObj = mwes.get(mweId).asObject();
 
             String ss = null, ss2 = null, lexcat = null;
+            JsonObject hr = null;
             if (mweObj.get("ss") != null && !mweObj.get("ss").isNull()) {
                 ss = mweObj.get("ss").asString();
             }
@@ -204,6 +206,10 @@ public class StreusleMapper extends PepperMapperImpl {
             if (mweObj.get("lexcat") != null && !mweObj.get("lexcat").isNull()) {
                 lexcat = mweObj.get("lexcat").asString();
             }
+            if (mweObj.get("heuristic_relation") != null && !mweObj.get("heuristic_relation").isNull()) {
+                hr = mweObj.get("heuristic_relation").asObject();
+            }
+
             SSpan mweSpan = id2mwe.get(Integer.parseInt(mweId));
             if (ss != null) {
                 annotateNode(mweSpan, "ss", ss);
@@ -213,6 +219,36 @@ public class StreusleMapper extends PepperMapperImpl {
             }
             if (lexcat != null) {
                 annotateNode(mweSpan, "lexcat", lexcat);
+            }
+            if (hr != null) {
+                // handle this a little unsafely--we can be pretty sure this'll be formatted right
+                int pId = mweObj.get("toknums").asArray().get(0).asInt();
+
+                if (!hr.get("gov").isNull()) {
+                    int govId = hr.get("gov").asInt();
+                    SPointingRelation govRel = SaltFactory.createSPointingRelation();
+                    govRel.setType("govobj");
+                    govRel.setSource(id2token.get(Integer.toString(pId)));
+                    govRel.setTarget(id2token.get(Integer.toString(govId)));
+                    SAnnotation ann = SaltFactory.createSAnnotation();
+                    ann.setName("govobj_type");
+                    ann.setValue("gov");
+                    govRel.addAnnotation(ann);
+                    govobj.addRelation(govRel);
+                }
+
+                if (!hr.get("obj").isNull()) {
+                    int objId = hr.get("obj").asInt();
+                    SPointingRelation objRel = SaltFactory.createSPointingRelation();
+                    objRel.setType("govobj");
+                    objRel.setSource(id2token.get(Integer.toString(pId)));
+                    objRel.setTarget(id2token.get(Integer.toString(objId)));
+                    SAnnotation ann = SaltFactory.createSAnnotation();
+                    ann.setName("govobj_type");
+                    ann.setValue("obj");
+                    objRel.addAnnotation(ann);
+                    govobj.addRelation(objRel);
+                }
             }
         }
     }
@@ -500,13 +536,14 @@ public class StreusleMapper extends PepperMapperImpl {
      * @param doc ref to the SDocumentGraph
      * @param edepsLayer The layer containing the enhanced dependencies.
      * @param cycleLayer The layer containing the cycle-breaking edges in the edeps layer.
+     * @param govobj The layer containing govobj info (see govobj.py in nert-nlp/streusle)
      * @param primaryText the STextualDS object anchoring all our annotations
      * @param sentence the JSON piece corresponding to this sentence, which is a JSON object
      *                 with fields "sent_id", "streusle_sent_id", "mwe", "toks", "etoks",
      *                 "swes", "smwes", and "wmwes".
      */
     private void processSentence(SDocumentGraph doc, SLayer edepsLayer, SLayer cycleLayer,
-                                 STextualDS primaryText, JsonObject sentence) {
+                                 SLayer govobj, STextualDS primaryText, JsonObject sentence) {
         /*\
         |*| Setup
         \*/
@@ -577,8 +614,8 @@ public class StreusleMapper extends PepperMapperImpl {
 
         // LEXCAT (12), SS (14), and SS2 (15) are stored separately under "mwes", "smwes", and "wmwes"
         processSwes(doc, sentence, id2token);
-        processMwes(sentence, id2smwe, true);
-        processMwes(sentence, id2wmwe, false);
+        processMwes(sentence, id2smwe, id2token, govobj, true);
+        processMwes(sentence, id2wmwe, id2token, govobj, false);
     }
 
     /**
@@ -606,20 +643,23 @@ public class StreusleMapper extends PepperMapperImpl {
         // make the STextualDS
         STextualDS primaryText = buildTextualDS(doc, sentences);
 
-        // make and hold on to a layer reference for enhanced dependencies: any relation
+        // three more layers: enhanced dependencies, a cycle-breaking layer, and a govobj layer
         SLayer edeps = SaltFactory.createSLayer();
         edeps.setName("edeps");
         SLayer cycle = SaltFactory.createSLayer();
         cycle.setName("cycle");
+        SLayer govobj = SaltFactory.createSLayer();
+        govobj.setName("govobj");
 
         // process each sentence independently
         for (JsonObject sentence : sentences) {
-            processSentence(doc, edeps, cycle, primaryText, sentence);
+            processSentence(doc, edeps, cycle, govobj, primaryText, sentence);
         }
 
         // add the layer after we're done adding rels to it
         doc.addLayer(edeps);
         doc.addLayer(cycle);
+        doc.addLayer(govobj);
     }
 
     /**

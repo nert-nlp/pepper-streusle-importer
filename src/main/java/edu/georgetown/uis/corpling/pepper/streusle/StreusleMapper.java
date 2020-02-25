@@ -151,10 +151,43 @@ public class StreusleMapper extends PepperMapperImpl {
         }
     }
 
+    private void processGovobj(SDocumentGraph doc, Map<String, SToken> id2token,
+                               SLayer govobj, JsonObject sweObj, JsonObject hr) {
+        int pId = sweObj.get("toknums").asArray().get(0).asInt();
+        SSpan span = doc.createSpan(id2token.get(Integer.toString(pId)));
+        annotateNode(span, "config", hr.get("config").asString());
+
+        if (!hr.get("gov").isNull()) {
+            int govId = hr.get("gov").asInt();
+            SPointingRelation govRel = SaltFactory.createSPointingRelation();
+            govRel.setType("govobj");
+            govRel.setSource(id2token.get(Integer.toString(pId)));
+            govRel.setTarget(id2token.get(Integer.toString(govId)));
+            SAnnotation ann = SaltFactory.createSAnnotation();
+            ann.setName("govobj_type");
+            ann.setValue("gov");
+            govRel.addAnnotation(ann);
+            govobj.addRelation(govRel);
+        }
+
+        if (!hr.get("obj").isNull()) {
+            int objId = hr.get("obj").asInt();
+            SPointingRelation objRel = SaltFactory.createSPointingRelation();
+            objRel.setType("govobj");
+            objRel.setSource(id2token.get(Integer.toString(pId)));
+            objRel.setTarget(id2token.get(Integer.toString(objId)));
+            SAnnotation ann = SaltFactory.createSAnnotation();
+            ann.setName("govobj_type");
+            ann.setValue("obj");
+            objRel.addAnnotation(ann);
+            govobj.addRelation(objRel);
+        }
+    }
+
     /**
      * Annotate single-word expressions with supersense and lexcat information.
      */
-    private void processSwes(SDocumentGraph doc, JsonObject sentence, Map<String, SToken> id2token) {
+    private void processSwes(SDocumentGraph doc, JsonObject sentence, Map<String, SToken> id2token, SLayer govobj) {
         // a JsonObject mapping an ID like "1" to another JsonObject
         JsonObject swes = sentence.get("swes").asObject();
 
@@ -168,6 +201,7 @@ public class StreusleMapper extends PepperMapperImpl {
                 String tokId = Integer.toString(tokNum.asInt());
                 SToken sToken = id2token.get(tokId);
                 SSpan span = doc.createSpan(sToken);
+
                 if (ss != null) {
                     annotateNode(span, "ss", ss);
                 }
@@ -176,6 +210,10 @@ public class StreusleMapper extends PepperMapperImpl {
                 }
                 if (lexcat != null) {
                     annotateNode(span, "lexcat", lexcat);
+                }
+                if (sweObj.get("heuristic_relation") != null && !sweObj.get("heuristic_relation").isNull()) {
+                    JsonObject hr = sweObj.get("heuristic_relation").asObject();
+                    processGovobj(doc, id2token, govobj, sweObj, hr);
                 }
             }
         }
@@ -186,7 +224,7 @@ public class StreusleMapper extends PepperMapperImpl {
      * We rely on the SSpans that were already created for MWEs, and we rely on the id2mwe map
      * to find them based on the ID we find under the "smwes" or "wmwes" keys.
      */
-    private void processMwes(JsonObject sentence, Map<Integer, SSpan> id2mwe,
+    private void processMwes(SDocumentGraph doc, JsonObject sentence, Map<Integer, SSpan> id2mwe,
                              Map<String, SToken> id2token, SLayer govobj, boolean strong) {
         // a JsonObject mapping an ID like "1" to another JsonObject
         JsonObject mwes = sentence.get(strong ? "smwes" : "wmwes").asObject();
@@ -221,34 +259,7 @@ public class StreusleMapper extends PepperMapperImpl {
                 annotateNode(mweSpan, "lexcat", lexcat);
             }
             if (hr != null) {
-                // handle this a little unsafely--we can be pretty sure this'll be formatted right
-                int pId = mweObj.get("toknums").asArray().get(0).asInt();
-
-                if (!hr.get("gov").isNull()) {
-                    int govId = hr.get("gov").asInt();
-                    SPointingRelation govRel = SaltFactory.createSPointingRelation();
-                    govRel.setType("govobj");
-                    govRel.setSource(id2token.get(Integer.toString(pId)));
-                    govRel.setTarget(id2token.get(Integer.toString(govId)));
-                    SAnnotation ann = SaltFactory.createSAnnotation();
-                    ann.setName("govobj_type");
-                    ann.setValue("gov");
-                    govRel.addAnnotation(ann);
-                    govobj.addRelation(govRel);
-                }
-
-                if (!hr.get("obj").isNull()) {
-                    int objId = hr.get("obj").asInt();
-                    SPointingRelation objRel = SaltFactory.createSPointingRelation();
-                    objRel.setType("govobj");
-                    objRel.setSource(id2token.get(Integer.toString(pId)));
-                    objRel.setTarget(id2token.get(Integer.toString(objId)));
-                    SAnnotation ann = SaltFactory.createSAnnotation();
-                    ann.setName("govobj_type");
-                    ann.setValue("obj");
-                    objRel.addAnnotation(ann);
-                    govobj.addRelation(objRel);
-                }
+                processGovobj(doc, id2token, govobj, mweObj, hr);
             }
         }
     }
@@ -613,9 +624,9 @@ public class StreusleMapper extends PepperMapperImpl {
         processLextag(doc, sTokens, tokens);
 
         // LEXCAT (12), SS (14), and SS2 (15) are stored separately under "mwes", "smwes", and "wmwes"
-        processSwes(doc, sentence, id2token);
-        processMwes(sentence, id2smwe, id2token, govobj, true);
-        processMwes(sentence, id2wmwe, id2token, govobj, false);
+        processSwes(doc, sentence, id2token, govobj);
+        processMwes(doc, sentence, id2smwe, id2token, govobj, true);
+        processMwes(doc, sentence, id2wmwe, id2token, govobj, false);
     }
 
     /**

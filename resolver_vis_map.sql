@@ -14,7 +14,7 @@ VALUES ('streusle', 'default_ns', 'node', 'grid', 'lexical', 'permanent', 1, 'an
 -- make a view for extra annos
 INSERT INTO annis343.resolver_vis_map
 (corpus, namespace, element, vis_type, display_name, visibility, "order", mappings)
-VALUES ('streusle', 'default_ns', 'node', 'grid', 'extra', 'hidden', 999, 'annos:sent_id, lextag');
+VALUES ('streusle', 'default_ns', 'node', 'grid', 'extra', 'hidden', 999, 'annos:sent_id, lextag, config, tok');
 
 -- rename edge views
 UPDATE annis343.resolver_vis_map SET display_name='deps' WHERE display_name='ud (default_ns)';

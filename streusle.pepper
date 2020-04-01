@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<pepper-job id="streusle" version="1.0">
+  <importer name="StreusleImporter" path="./streusle/">
+  </importer>
+  <exporter name="AnnisExporter" path="./out/annis/">
+  </exporter>
+  <exporter name="PAULAExporter" path="./out/paula/">
+  </exporter>
+</pepper-job>
